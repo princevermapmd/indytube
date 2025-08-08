@@ -1,0 +1,1166 @@
+<html lang="en" class="scroll-smooth">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CSCLI WORKER</title>
+    <link rel="icon" href="https://www.state.gov/wp-content/uploads/2022/04/cropped-dos_seal-192x192.png"
+        sizes="192x192" />
+    <link rel="stylesheet" href="https://unpkg.com/prismjs/themes/prism-coy.css" />
+    <link rel="stylesheet" href="https://unpkg.com/jquery.terminal/css/jquery.terminal.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            font-family: 'Fira Mono', monospace, monospace;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+
+        .term {
+            height: 100vh;
+            width: 100vw;
+            font-family: 'Fira Mono', monospace, monospace !important;
+            font-size: 1rem !important;
+            line-height: 1.4 !important;
+            transition: color 0.3s ease;
+        }
+
+        .theme-dark {
+            background-color: #000;
+            color: #fff;
+        }
+
+        .theme-light {
+            background-color: #fff;
+            color: #000;
+        }
+
+        .theme-hacker {
+            background-color: #000;
+            color: #0f0;
+        }
+
+        .theme-blue {
+            background-color: #112233;
+            color: #aaccff;
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Mono&display=swap" rel="stylesheet" />
+</head>
+
+<body class="theme-dark overflow-hidden">
+    <div class="term"></div>
+
+    <script src="https://code.jquery.com/jquery-3.1.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery.terminal/js/jquery.terminal.min.js"></script>
+
+    <script>
+        // Global variables
+        var cwd = "/";
+        var loggedInUser = null;
+        var failedAdminAttempts = 0;
+        var banUntil = null;
+        var currentTheme = 'dark';
+        // Current directory path simulation
+        var currentPath = ['~'];
+        var fileSystem = {
+            '~': {
+                type: 'dir',
+                contents: {
+                    'documents': {
+                        type: 'dir',
+                        contents: {
+                            'work': { type: 'dir', contents: {} },
+                            'personal': { type: 'dir', contents: {} }
+                        }
+                    },
+                    'downloads': {
+                        type: 'dir',
+                        contents: {
+                            'ubuntu.iso': { type: 'file', size: '2.5GB' },
+                            'package.deb': { type: 'file', size: '45MB' }
+                        }
+                    },
+                    'pictures': {
+                        type: 'dir',
+                        contents: {
+                            'vacation.jpg': { type: 'file', size: '3.2MB' },
+                            'profile.png': { type: 'file', size: '1.1MB' }
+                        }
+                    },
+                    '.bashrc': { type: 'file', size: '4KB' },
+                    '.ssh': { type: 'dir', contents: {} },
+                    'app.js': { type: 'file', size: '42KB' },
+                    'index.html': { type: 'file', size: '12KB' },
+                    'readme.md': { type: 'file', size: '5KB' }
+                }
+            },
+            '/': {
+                type: 'dir',
+                contents: {
+                    'bin': { type: 'dir', contents: {} },
+                    'etc': { type: 'dir', contents: {} },
+                    'home': { type: 'dir', contents: {} }
+                }
+            }
+        };
+        // Load saved theme from localStorage or use default
+        currentTheme = localStorage.getItem('terminalTheme') || 'dark';
+
+        // Apply the theme immediately on page load
+        const themes = {
+            dark: { bg: '#000', text: '#fff', prompt: 'red', class: 'theme-dark' },
+            light: { bg: '#fff', text: '#000', prompt: 'blue', class: 'theme-light' },
+            hacker: { bg: '#000', text: '#0f0', prompt: 'green', class: 'theme-hacker' },
+            blue: { bg: '#112233', text: '#aaccff', prompt: 'yellow', class: 'theme-blue' }
+        };
+
+        const initialTheme = themes[currentTheme];
+        $('body')
+            .addClass(initialTheme.class)
+            .css('background-color', initialTheme.bg);
+        $('.terminal').css('color', initialTheme.text);
+
+        // Color helper function
+        function color(name, string) {
+            const colors = {
+                blue: "#55f",
+                green: "#4d4",
+                grey: "#999",
+                red: "#A00",
+                yellow: "#FF5",
+                violet: "#a320ce",
+                white: "#fff",
+            };
+            return colors[name] ? `[[;${colors[name]};]${string}]` : string;
+        }
+        // Helper function to get current directory contents
+        function getCurrentDir() {
+            let dir = fileSystem;
+            for (let part of currentPath) {
+                if (part === '~') part = 'home/user'; // Simulate home directory
+                if (dir[part] && dir[part].contents) {
+                    dir = dir[part].contents;
+                } else {
+                    return null;
+                }
+            }
+            return dir;
+        }
+        // Update prompt to show current directory
+        function updatePrompt() {
+            const path = currentPath.join('/');
+            const theme = currentTheme === 'hacker' ? 'green' :
+                currentTheme === 'light' ? 'blue' : 'red';
+            term.set_prompt(
+                color(theme, loggedInUser ? loggedInUser.email : 'user@example.com') +
+                ":" + color("blue", path) + "$ "
+            );
+        }
+
+        // Number parsing utility
+        function parseNums(args) {
+            return args.map(a => typeof a === "string" ?
+                Number(a.replace(/,/g, "").trim()) :
+                Number(a));
+        }
+
+        // User database
+        var users = {
+            "admin@example.com": { password: "admin123", role: "admin" },
+            "user@example.com": { password: "user123", role: "user" },
+        };
+
+        // Terminal instance
+        var term;
+
+        // Admin ban check
+        function isAdminBanned() {
+            if (!banUntil) return false;
+            if (Date.now() > banUntil) {
+                banUntil = null;
+                failedAdminAttempts = 0;
+                return false;
+            }
+            return true;
+        }
+
+        // Login command
+        function loginCommand(cmd) {
+            var self = this;
+            if (loggedInUser) {
+                self.echo(`Already logged in as ${loggedInUser.email}`);
+                return;
+            }
+
+            if (cmd.args.length !== 2 || cmd.args[0] !== "su") {
+                self.error("Usage: sudo su");
+                return;
+            }
+
+            if (isAdminBanned()) {
+                let waitSec = Math.ceil((banUntil - Date.now()) / 1000);
+                self.error(`Too many failed attempts. Admin commands are banned for ${waitSec} seconds.`);
+                return;
+            }
+
+            var email = "admin@example.com";
+            if (!users[email]) {
+                self.error("User not found");
+                return;
+            }
+
+            self.push(function (password) {
+                if (password === users[email].password) {
+                    loggedInUser = { email: email, role: users[email].role };
+                    failedAdminAttempts = 0;
+                    banUntil = null;
+                    self.pop();
+                    self.echo("Login successful as admin!");
+                    updatePrompt();
+                } else {
+                    failedAdminAttempts++;
+                    self.error("Incorrect password");
+                    if (failedAdminAttempts >= 3) {
+                        banUntil = Date.now() + 5 * 60 * 1000;
+                        self.error("Too many failed attempts. Admin commands are banned for 5 minutes.");
+                    }
+                    self.pop();
+                }
+            }, {
+                prompt: "Password: ",
+                echo: false,
+                mask: "*",
+            });
+        }
+
+        // Clear IndexedDB
+        function clearIndexedDBAndReload() {
+            const request = indexedDB.open("assetsDB");
+            request.onerror = () => term.error("Failed to open IndexedDB.");
+            request.onsuccess = (e) => {
+                const db = e.target.result;
+                const transaction = db.transaction(["assets"], "readwrite");
+                transaction.objectStore("assets").clear();
+                transaction.oncomplete = () => term.echo("IndexedDB cleared successfully.");
+                transaction.onerror = () => term.error("Error clearing IndexedDB.");
+            };
+        }
+
+        // Update terminal prompt
+        function updatePrompt() {
+            const theme = currentTheme === 'hacker' ? 'green' :
+                currentTheme === 'light' ? 'blue' : 'red';
+            term.set_prompt(
+                color(theme, loggedInUser ? loggedInUser.email : 'user@example.com') +
+                ":" + color("blue", cwd) + "$ "
+            );
+        }
+
+        // Command wrapper for auto-clear
+        function createCommandWrapper(fn) {
+            return function (cmd) {
+                if (!['theme', 'clear', 'clearindex', 'clearcache', 'exit', 'monitor'].includes(cmd.name)) {
+                    this.clear();
+                }
+                return fn.call(this, cmd);
+            };
+        }
+
+        // All commands
+        var commands = {
+            help: createCommandWrapper(function () {
+                this.echo(
+                    "Available commands:\n" +
+                    "help - Show this help\n" +
+                    "credits - Show credits\n" +
+                    "add num1 num2 - Add numbers\n" +
+                    "multiply num1 num2 - Multiply\n" +
+                    "sum num1 [num2 ...] - Sum\n" +
+                    "subt num1 num2 - Subtract\n" +
+                    "time - Current time\n" +
+                    "echo <message> - Print message\n" +
+                    "sudo su - Login as admin\n" +
+                    "clearindex - Clear IndexedDB\n" +
+                    "clearcache - Clear cache\n" +
+                    "theme [dark|light|hacker|blue] - Change theme\n" +
+                    "monitor [network|cpu|ram|all] - System monitor\n" +
+                    "ipinfo - Show IP information\n" +
+                    "dir - List directory\n" +
+                    "tree - Directory tree\n" +
+                    "trace <number> - Trace mobile\n" +
+                    "top - Running processes\n" +
+                    "find <file> - Search files\n" +
+                    "exit - Close terminal"
+                );
+            }),
+            // LS command implementation
+            ls: createCommandWrapper(function (cmd) {
+                const showHidden = cmd.args.includes('-a');
+                const longFormat = cmd.args.includes('-l');
+                const currentDir = getCurrentDir();
+
+                if (!currentDir) {
+                    this.error("Directory not found");
+                    return;
+                }
+
+                // Get files and directories
+                const items = Object.keys(currentDir)
+                    .filter(name => showHidden || !name.startsWith('.'))
+                    .sort((a, b) => {
+                        if (currentDir[a].type === currentDir[b].type) {
+                            return a.localeCompare(b);
+                        }
+                        return currentDir[a].type === 'dir' ? -1 : 1;
+                    });
+
+                if (longFormat) {
+                    // Detailed listing
+                    this.echo("total " + items.length);
+                    this.echo("Permissions\tLinks\tOwner\tGroup\tSize\tModified\tName");
+                    this.echo("----------\t-----\t-----\t-----\t----\t--------\t----");
+
+                    items.forEach(name => {
+                        const item = currentDir[name];
+                        const isDir = item.type === 'dir';
+                        const permissions = isDir ? 'drwxr-xr-x' : '-rw-r--r--';
+                        const links = isDir ? '2' : '1';
+                        const owner = 'user';
+                        const group = 'user';
+                        const size = item.size || '-';
+                        const modified = 'Jul 13 12:00';
+
+                        this.echo(`${permissions}\t${links}\t${owner}\t${group}\t${size}\t${modified}\t${name}`);
+                    });
+                } else {
+                    // Simple listing
+                    const dirs = items.filter(name => currentDir[name].type === 'dir');
+                    const files = items.filter(name => currentDir[name].type === 'file');
+
+                    // Color directories blue
+                    const coloredDirs = dirs.map(dir => color('blue', dir));
+                    this.echo(coloredDirs.join(' ') + ' ' + files.join(' '));
+                }
+            }),
+
+            // CD command implementation
+            cd: createCommandWrapper(function (cmd) {
+                if (cmd.args.length === 0 || cmd.args[0] === '~') {
+                    // Go to home directory
+                    currentPath = ['~'];
+                    return;
+                }
+
+                if (cmd.args[0] === '/') {
+                    // Go to root directory
+                    currentPath = ['/'];
+                    return;
+                }
+
+                if (cmd.args[0] === '..') {
+                    // Go up one directory
+                    if (currentPath.length > 1) {
+                        currentPath.pop();
+                    }
+                    return;
+                }
+
+                const targetDir = cmd.args[0];
+                const currentDir = getCurrentDir();
+
+                if (currentDir && currentDir[targetDir] && currentDir[targetDir].type === 'dir') {
+                    currentPath.push(targetDir);
+                } else {
+                    this.error(`cd: ${targetDir}: No such directory`);
+                }
+            }),
+
+            // Enhanced DIR command
+            dir: createCommandWrapper(function () {
+                const currentDir = getCurrentDir();
+                if (!currentDir) {
+                    this.error("Directory not found");
+                    return;
+                }
+
+                const items = Object.keys(currentDir)
+                    .sort((a, b) => {
+                        if (currentDir[a].type === currentDir[b].type) {
+                            return a.localeCompare(b);
+                        }
+                        return currentDir[a].type === 'dir' ? -1 : 1;
+                    });
+
+                this.echo("Type\tSize\tModified\t\tName");
+                this.echo("----\t----\t--------\t\t----");
+
+                items.forEach(name => {
+                    const item = currentDir[name];
+                    const type = item.type === 'dir' ? 'dir' : 'file';
+                    const size = item.size || '-';
+                    const modified = '2023-07-13';
+
+                    this.echo(`${type}\t${size}\t${modified}\t${name}`);
+                });
+
+                const dirCount = items.filter(name => currentDir[name].type === 'dir').length;
+                const fileCount = items.filter(name => currentDir[name].type === 'file').length;
+
+                this.echo(`\nTotal: ${items.length} (${dirCount} directories, ${fileCount} files)`);
+            }),
+
+            theme: createCommandWrapper(function (cmd) {
+                const themes = {
+                    dark: { bg: '#000', text: '#fff', prompt: 'red', class: 'theme-dark' },
+                    light: { bg: '#fff', text: '#000', prompt: 'blue', class: 'theme-light' },
+                    hacker: { bg: '#000', text: '#0f0', prompt: 'green', class: 'theme-hacker' },
+                    blue: { bg: '#112233', text: '#aaccff', prompt: 'yellow', class: 'theme-blue' }
+                };
+
+                if (cmd.args.length !== 1 || !themes[cmd.args[0]]) {
+                    this.error("Usage: theme [dark|light|hacker|blue]");
+                    return;
+                }
+
+                currentTheme = cmd.args[0];
+                // Save theme to localStorage
+                localStorage.setItem('terminalTheme', currentTheme);
+
+                const theme = themes[currentTheme];
+
+                $('body')
+                    .removeClass()
+                    .addClass(theme.class)
+                    .css('background-color', theme.bg);
+
+                $('.terminal').css('color', theme.text);
+                updatePrompt();
+                this.echo(`Terminal theme set to ${currentTheme}`);
+            }),
+            monitor: createCommandWrapper(function (cmd) {
+                if (cmd.args.length < 1) {
+                    this.echo("Usage: monitor [network|cpu|ram|all]");
+                    return;
+                }
+
+                const types = cmd.args.includes('all') ? ['network', 'cpu', 'ram'] : cmd.args;
+                let interval;
+
+                const updateStats = () => {
+                    this.clear();
+                    types.forEach(type => {
+                        switch (type) {
+                            case 'network':
+                                const traffic = Math.floor(Math.random() * 1000);
+                                this.echo(`NETWORK: ${traffic}KB/s ↑ ${traffic + 50}KB/s ↓`);
+                                break;
+                            case 'cpu':
+                                const cpuLoad = Math.floor(Math.random() * 100);
+                                this.echo(`CPU: [${'#'.repeat(cpuLoad / 5)}${'.'.repeat(20 - cpuLoad / 5)}] ${cpuLoad}%`);
+                                break;
+                            case 'ram':
+                                const ramUsed = 2 + Math.random() * 6;
+                                this.echo(`RAM: ${ramUsed.toFixed(1)}GB/8GB (${Math.floor(ramUsed / 8 * 100)}%)`);
+                                break;
+                        }
+                    });
+                    this.echo("\nPress Ctrl+C to stop");
+                };
+
+                updateStats();
+                interval = setInterval(updateStats, 2000);
+
+                this.push(function () {
+                    clearInterval(interval);
+                    this.pop();
+                }, { prompt: '' });
+            }),
+
+            ipinfo: createCommandWrapper(function () {
+                fetch('https://api.ipify.org?format=json')
+                    .then(response => response.json())
+                    .then(data => {
+                        this.echo(
+                            `Public IP: ${data.ip}\n` +
+                            `Location: Mumbai, India\n` +
+                            `ISP: Jio Telecom\n` +
+                            `Coordinates: 19.0760, 72.8777`
+                        );
+                    })
+                    .catch(() => {
+                        this.echo("Public IP: 192.168.1.1\nLocation: Delhi, India\nISP: Airtel");
+                    });
+            }),
+            login: function (cmd) {
+                var self = this;
+                if (loggedInUser) {
+                    self.echo("Already logged in as " + loggedInUser.email);
+                    return;
+                }
+                if (cmd.args.length !== 1) {
+                    self.error("Usage: login email@example.com");
+                    return;
+                }
+                var email = cmd.args[0].toLowerCase();
+
+                if (!users[email]) {
+                    self.error("User not found");
+                    return;
+                }
+
+                self.push(function (password) {
+                    if (password === users[email].password) {
+                        loggedInUser = { email: email, role: users[email].role };
+                        self.pop();
+                        self.echo("Login successful!");
+                        self.set_prompt(
+                            color("red", loggedInUser.email) + ":" + color("blue", cwd) + "$ "
+                        );
+                    } else {
+                        self.error("Incorrect password");
+                        self.pop();
+                    }
+                }, {
+                    prompt: "Password: ",
+                    echo: false,
+                    mask: "*",
+                });
+            },
+            sudo: function (cmd) {
+                if (isAdminBanned()) {
+                    let waitSec = Math.ceil((banUntil - Date.now()) / 1000);
+                    this.error(
+                        `Too many failed attempts. Admin commands are banned for ${waitSec} seconds.`
+                    );
+                    return;
+                }
+                loginCommand.call(this, cmd);
+            },
+            ping: function (cmd) {
+                if (!loggedInUser) {
+                    this.error("You must login first");
+                    return;
+                }
+                if (loggedInUser.role !== "admin") {
+                    this.error("Permission denied: ping command only for admin");
+                    return;
+                }
+                if (cmd.args.length !== 1) {
+                    this.error("Usage: ping <hostname>");
+                    return;
+                }
+                var hostname = cmd.args[0];
+                var self = this;
+
+                var start = Date.now();
+                var timeout = 5000;
+
+                var didRespond = false;
+
+                function showResult(success) {
+                    var time = Date.now() - start;
+                    if (success) {
+                        self.echo(`PING ${hostname} (${hostname}): 56 data bytes`);
+                        self.echo(`64 bytes from ${hostname}: icmp_seq=0 ttl=64 time=${time} ms`);
+                        self.echo(`\n--- ${hostname} ping statistics ---`);
+                        self.echo(`1 packets transmitted, 1 packets received, 0% packet loss`);
+                        self.echo(`round-trip min/avg/max/stddev = ${time}/${time}/${time}/0 ms`);
+                    } else {
+                        self.echo(`Request to ${hostname} timed out.`);
+                    }
+                }
+
+                var controller = new AbortController();
+                var signal = controller.signal;
+
+                setTimeout(() => {
+                    if (!didRespond) {
+                        controller.abort();
+                        showResult(false);
+                    }
+                }, timeout);
+
+                fetch("https://" + hostname + "/", { mode: "no-cors", signal })
+                    .then(() => {
+                        didRespond = true;
+                        showResult(true);
+                    })
+                    .catch(() => {
+                        if (!didRespond) {
+                            didRespond = true;
+                            showResult(false);
+                        }
+                    });
+            },
+            redirect: function (cmd) {
+                console.log(cmd)
+                if (cmd.args.length !== 1) {
+                    this.error("Usage: redirect <url>");
+                    return;
+                }
+                let url = cmd.args[0];
+                try {
+                    new URL(url);
+                    this.echo(`Redirecting to ${url} ...`);
+                    setTimeout(() => {
+                        window.location.href = url;
+                    }, 500);
+                } catch {
+                    this.error("Invalid URL");
+                }
+            },
+
+
+            dir: createCommandWrapper(function () {
+                const files = [
+                    // System directories
+                    { name: "bin", type: "dir", size: "-", modified: "2023-06-15", permissions: "drwxr-xr-x" },
+                    { name: "etc", type: "dir", size: "-", modified: "2023-07-01", permissions: "drwxr-xr-x" },
+                    { name: "home", type: "dir", size: "-", modified: "2023-07-10", permissions: "drwxr-xr-x" },
+                    { name: "var", type: "dir", size: "-", modified: "2023-07-05", permissions: "drwxr-xr-x" },
+
+                    // User files
+                    { name: "documents", type: "dir", size: "-", modified: "2023-05-15", permissions: "drwxr-xr-x" },
+                    { name: "downloads", type: "dir", size: "-", modified: "2023-06-20", permissions: "drwxr-xr-x" },
+                    { name: "pictures", type: "dir", size: "-", modified: "2023-07-01", permissions: "drwxr-xr-x" },
+
+                    // System files
+                    { name: "notes.txt", type: "file", size: "15KB", modified: "2023-07-01", permissions: "-rw-r--r--" },
+                    { name: "app.js", type: "file", size: "42KB", modified: "2023-07-10", permissions: "-rwxr-xr-x" },
+                    { name: "config.json", type: "file", size: "88KB", modified: "2023-07-15", permissions: "-rw-r--r--" },
+
+                    // Website files
+                    { name: "index.html", type: "file", size: "12KB", modified: "2023-07-18", permissions: "-rw-r--r--" },
+                    { name: "style.css", type: "file", size: "8KB", modified: "2023-07-19", permissions: "-rw-r--r--" },
+                    { name: "script.js", type: "file", size: "24KB", modified: "2023-07-20", permissions: "-rwxr-xr-x" },
+
+                    // Database files
+                    { name: "database.sql", type: "file", size: "73MB", modified: "2023-07-20", permissions: "-rw-r-----" },
+                    { name: "backup.zip", type: "file", size: "528MB", modified: "2023-07-25", permissions: "-rw-r--r--" },
+
+                    // Configuration files
+                    { name: ".bashrc", type: "file", size: "4KB", modified: "2023-06-10", permissions: "-rw-r--r--" },
+                    { name: ".ssh", type: "dir", size: "-", modified: "2023-05-20", permissions: "drwx------" },
+
+                    // Log files
+                    { name: "access.log", type: "file", size: "142MB", modified: "2023-07-13", permissions: "-rw-r--r--" },
+                    { name: "error.log", type: "file", size: "28MB", modified: "2023-07-13", permissions: "-rw-r--r--" },
+
+                    // Current files
+                    { name: "readme.txt", type: "file", size: "31KB", modified: "2025-07-13", permissions: "-rw-r--r--" },
+                    { name: "todo.md", type: "file", size: "5KB", modified: "2025-07-12", permissions: "-rw-r--r--" }
+                ];
+
+                // Sort by name
+                files.sort((a, b) => a.name.localeCompare(b.name));
+
+                // Display header
+                this.echo("Permissions\tType\tSize\tModified\t\tName");
+                this.echo("----------\t----\t----\t--------\t\t----");
+
+                // Display files
+                files.forEach(file => {
+                    this.echo(`${file.permissions}\t${file.type}\t${file.size}\t${file.modified}\t${file.name}`);
+                });
+
+                // Display summary
+                this.echo("\nTotal items: " + files.length);
+                this.echo("Directories: " + files.filter(f => f.type === "dir").length);
+                this.echo("Files: " + files.filter(f => f.type === "file").length);
+                this.echo("Total size: ~650MB");
+                this.echo("Hidden items: 3 (use 'ls -a' to view)");
+            }),
+            tree: createCommandWrapper(function () {
+                this.echo("Linux System Directory Structure\n");
+                this.echo(".");
+                this.echo("├── bin/");
+                this.echo("│   ├── bash");
+                this.echo("│   ├── cp");
+                this.echo("│   ├── ls");
+                this.echo("│   └── mv");
+                this.echo("├── etc/");
+                this.echo("│   ├── passwd");
+                this.echo("│   ├── group");
+                this.echo("│   └── hosts");
+                this.echo("├── home/");
+                this.echo("│   ├── user/");
+                this.echo("│   │   ├── Documents/");
+                this.echo("│   │   │   ├── Projects/");
+                this.echo("│   │   │   │   ├── website/");
+                this.echo("│   │   │   │   │   ├── index.html");
+                this.echo("│   │   │   │   │   ├── style.css");
+                this.echo("│   │   │   │   │   └── script.js");
+                this.echo("│   │   │   │   └── app/");
+                this.echo("│   │   │   │       ├── main.py");
+                this.echo("│   │   │   │       └── config.ini");
+                this.echo("│   │   │   ├── Reports/");
+                this.echo("│   │   │   │   ├── Q1_2023.pdf");
+                this.echo("│   │   │   │   └── Q2_2023.pdf");
+                this.echo("│   │   │   └── Personal/");
+                this.echo("│   │   │       ├── Resume.docx");
+                this.echo("│   │   │       └── Taxes_2022.xlsx");
+                this.echo("│   │   ├── Downloads/");
+                this.echo("│   │   │   ├── ubuntu-22.04.iso");
+                this.echo("│   │   │   └── package.deb");
+                this.echo("│   │   ├── Pictures/");
+                this.echo("│   │   │   ├── Vacation/");
+                this.echo("│   │   │   │   ├── beach.jpg");
+                this.echo("│   │   │   │   └── mountains.jpg");
+                this.echo("│   │   │   └── profile.png");
+                this.echo("│   │   ├── Videos/");
+                this.echo("│   │   │   └── tutorial.mp4");
+                this.echo("│   │   ├── .bashrc");
+                this.echo("│   │   ├── .ssh/");
+                this.echo("│   │   │   └── id_rsa");
+                this.echo("│   │   └── .config/");
+                this.echo("│   │       └── app_settings.json");
+                this.echo("│   └── root/");
+                this.echo("│       └── system_backups/");
+                this.echo("├── var/");
+                this.echo("│   ├── www/");
+                this.echo("│   │   ├── html/");
+                this.echo("│   │   │   ├── index.php");
+                this.echo("│   │   │   └── assets/");
+                this.echo("│   │   └── logs/");
+                this.echo("│   │       └── access.log");
+                this.echo("│   └── lib/");
+                this.echo("│       └── mysql/");
+                this.echo("├── usr/");
+                this.echo("│   ├── local/");
+                this.echo("│   │   └── bin/");
+                this.echo("│   └── share/");
+                this.echo("│       └── man/");
+                this.echo("├── tmp/");
+                this.echo("│   └── tempfile.data");
+                this.echo("├── boot/");
+                this.echo("│   └── vmlinuz");
+                this.echo("├── dev/");
+                this.echo("│   ├── null");
+                this.echo("│   └── sda");
+                this.echo("├── proc/");
+                this.echo("│   ├── cpuinfo");
+                this.echo("│   └── meminfo");
+                this.echo("├── run/");
+                this.echo("│   └── pidfiles/");
+                this.echo("├── srv/");
+                this.echo("│   └── ftp/");
+                this.echo("├── opt/");
+                this.echo("│   └── applications/");
+                this.echo("├── root/");
+                this.echo("│   └── .bash_history");
+                this.echo("├── mnt/");
+                this.echo("│   └── external_drive/");
+                this.echo("├── media/");
+                this.echo("│   └── cdrom/");
+                this.echo("└── sys/");
+                this.echo("    └── kernel/");
+                this.echo("\nTotal directories: 42, Total files: 1,248, Total size: 15.7 GB");
+                this.echo("Hidden directories and files: 38 (use ls -a to view)");
+                this.echo("Disk usage: 24% of 64GB partition");
+            }),
+            trace: createCommandWrapper(function (cmd) {
+                if (cmd.args.length !== 1) {
+                    this.error("Usage: trace <mobile_number>");
+                    return;
+                }
+
+                const num = cmd.args[0];
+                if (!/^[6-9]\d{9}$/.test(num)) {
+                    this.error("Invalid Indian mobile number");
+                    return;
+                }
+
+                const cachedData = JSON.parse(localStorage.getItem(`trace_${num}`) || null);
+
+                if (cachedData) {
+                    this.echo(`(Cached result from ${new Date(cachedData.timestamp).toLocaleString()})`);
+                    displayTraceResult.call(this, cachedData);
+                    return;
+                }
+
+                this.echo("Tracing number...");
+
+                setTimeout(() => {
+                    const fakeData = {
+                        number: num,
+                        operator: ["Airtel", "Jio", "Vi"][Math.floor(Math.random() * 3)],
+                        circle: ["Delhi", "Mumbai", "Kolkata", "Chennai", "Bangalore"][Math.floor(Math.random() * 5)],
+                        name: ["Rahul", "Priya", "Amit", "Neha", "Ravi"][Math.floor(Math.random() * 5)] + " " +
+                            ["Sharma", "Patel", "Singh", "Kumar", "Gupta"][Math.floor(Math.random() * 5)],
+                        address: Math.random() > 0.5 ? "Urban area" : "Rural area",
+                        timestamp: Date.now()
+                    };
+
+                    localStorage.setItem(`trace_${num}`, JSON.stringify(fakeData));
+                    displayTraceResult.call(this, fakeData);
+                }, 2000);
+
+                function displayTraceResult(data) {
+                    this.echo(
+                        `Mobile Number: +91 ${data.number}\n` +
+                        `Operator: ${data.operator}\n` +
+                        `Circle: ${data.circle}\n` +
+                        `Registered Name: ${data.name}\n` +
+                        `Address Type: ${data.address}`
+                    );
+                }
+            }),
+
+            top: createCommandWrapper(function () {
+                const processes = [
+                    { pid: 1421, cpu: Math.floor(Math.random() * 80), mem: Math.floor(Math.random() * 8), command: "node server.js" },
+                    { pid: 1422, cpu: Math.floor(Math.random() * 30), mem: Math.floor(Math.random() * 5), command: "chrome" },
+                    { pid: 1423, cpu: Math.floor(Math.random() * 20), mem: Math.floor(Math.random() * 3), command: "bash" },
+                    { pid: 1424, cpu: Math.floor(Math.random() * 10), mem: 1, command: "ssh" }
+                ];
+
+                this.echo("PID\tCPU%\tMEM\tCOMMAND");
+                processes.forEach(p => {
+                    this.echo(`${p.pid}\t${p.cpu}%\t${p.mem}GB\t${p.command}`);
+                });
+            }),
+
+            find: createCommandWrapper(function (cmd) {
+                if (cmd.args.length < 1) {
+                    this.error("Usage: find <filename>");
+                    return;
+                }
+
+                const query = cmd.args[0].toLowerCase();
+                const files = [
+                    "/home/user/documents/report.txt",
+                    "/var/log/system.log",
+                    "/tmp/downloads/image.jpg",
+                    "/usr/local/bin/app",
+                    "/home/user/downloads/file.zip",
+                    "/etc/config/settings.json",
+                    "/home/user/pictures/photo.png",
+                    "/var/log/auth.log",
+                    "/home/user/music/aroma.mp3",
+                    "/home/user/videos/last_ride.mp4",
+                    "/home/user/.bashrc",
+                    "/home/user/.ssh/id_rsa",
+                    "/home/user/.ssh/known_hosts",
+                    "/home/user/.config/app/config.json",
+                    "/home/user/.ssh/authorized_keys",
+                    "/home/user/.cache/app/cache.db",
+                    "/home/user/.local/share/app/data.db",
+                    "/home/user/.local/share/app/logs/app.log",
+                    "/home/user/.local/share/app/settings.json",
+                    "/home/user/.local/share/app/backup.zip",
+                    "/home/user/.local/share/app/temp/tempfile.tmp",
+                    "/home/user/.local/share/app/updates/update.json",
+                    "/home/user/.local/share/app/updates/changelog.txt",
+                    "/home/user/.local/share/app/updates/release_notes.txt",
+                    "/home/user/.local/share/app/updates/version.txt",
+                    "/home/user/.local/share/app/updates/patch_notes.txt",
+                    "/home/user/.local/share/app/updates/installer.sh",
+                    "/home/user/.local/share/app/updates/uninstaller.sh",
+                    "/home/user/.local/share/app/updates/upgrade.sh"
+                ];
+
+                const results = files.filter(f => f.includes(query));
+
+                if (results.length > 0) {
+                    this.echo("Found files:");
+                    results.forEach(f => this.echo(f));
+                } else {
+                    this.echo("No files found matching your query");
+                }
+            }),
+
+            // Basic commands
+            add: createCommandWrapper(function (cmd) {
+                if (cmd.args.length < 2) {
+                    this.error("Usage: add num1 num2");
+                    return;
+                }
+                let nums = parseNums(cmd.args);
+                if (nums.some(isNaN)) {
+                    this.error("Invalid number input");
+                    return;
+                }
+                this.echo(`${nums[0]} + ${nums[1]} = ${nums[0] + nums[1]}`);
+            }),
+
+            multiply: createCommandWrapper(function (cmd) {
+                if (cmd.args.length < 2) {
+                    this.error("Usage: multiply num1 num2");
+                    return;
+                }
+                let nums = parseNums(cmd.args);
+                if (nums.some(isNaN)) {
+                    this.error("Invalid number input");
+                    return;
+                }
+                this.echo(`${nums[0]} * ${nums[1]} = ${nums[0] * nums[1]}`);
+            }),
+
+            sum: createCommandWrapper(function (cmd) {
+                if (cmd.args.length < 1) {
+                    this.error("Usage: sum num1 [num2 ...]");
+                    return;
+                }
+                let nums = parseNums(cmd.args);
+                if (nums.some(isNaN)) {
+                    this.error("Invalid number input");
+                    return;
+                }
+                this.echo(`Sum: ${nums.reduce((a, b) => a + b, 0)}`);
+            }),
+
+            subt: createCommandWrapper(function (cmd) {
+                if (cmd.args.length < 2) {
+                    this.error("Usage: subt num1 num2");
+                    return;
+                }
+                let nums = parseNums(cmd.args);
+                if (nums.some(isNaN)) {
+                    this.error("Invalid number input");
+                    return;
+                }
+                this.echo(`${nums[0]} - ${nums[1]} = ${nums[0] - nums[1]}`);
+            }),
+
+            time: createCommandWrapper(function () {
+                const now = new Date();
+                this.echo(`Current time: ${now.toLocaleTimeString()}`);
+            }),
+
+            echo: createCommandWrapper(function (cmd) {
+                if (cmd.args.length === 0) {
+                    this.error("Usage: echo <message>");
+                    return;
+                }
+                this.echo(cmd.args.join(" "));
+            }),
+
+            sudo: createCommandWrapper(function (cmd) {
+                if (isAdminBanned()) {
+                    let waitSec = Math.ceil((banUntil - Date.now()) / 1000);
+                    this.error(`Too many failed attempts. Admin commands are banned for ${waitSec} seconds.`);
+                    return;
+                }
+                loginCommand.call(this, cmd);
+            }),
+
+            clearindex: createCommandWrapper(function () {
+                this.echo("Clearing IndexedDB cache...");
+                clearIndexedDBAndReload();
+            }),
+
+            clearcache: createCommandWrapper(function () {
+                if ('caches' in window) {
+                    caches.keys().then(cacheNames => {
+                        return Promise.all(cacheNames.map(cacheName => caches.delete(cacheName)));
+                    }).then(() => {
+                        this.echo('Cache storage cleared successfully.');
+                    }).catch(error => {
+                        this.error('Error clearing cache storage:', error);
+                    });
+                } else {
+                    this.error('Cache API not supported in this browser.');
+                }
+            }),
+
+            exit: createCommandWrapper(function () {
+                this.echo("Closing terminal...");
+                setTimeout(() => {
+                    term.clear();
+                    term.disable();
+                    $(".term").hide();
+                }, 200);
+            }),
+            shutdown: createCommandWrapper(function () {
+                this.echo("You are not authorized to shutdown the system.");
+            }
+            ),
+            restart: createCommandWrapper(function () {
+                this.echo("You are not authorized to restart the system.");
+            }),
+            upgrade: createCommandWrapper(function () {
+                this.echo("Already running the latest version.");
+            }),
+            update: createCommandWrapper(function () {
+                this.echo("No updates available at the moment.");
+            }),
+            install: createCommandWrapper(function (cmd) {
+                if (cmd.args.length < 1) {
+                    this.error("Usage: install <package_name> [package2 ...]");
+                    return;
+                }
+
+                // Simulated package database
+                const packageDatabase = {
+                    'nginx': { version: '1.25.2', size: '2.1MB', deps: ['libc6', 'openssl'] },
+                    'nodejs': { version: '18.16.0', size: '35MB', deps: ['python3', 'gcc', 'make'] },
+                    'python3': { version: '3.11.4', size: '28MB', deps: ['libssl-dev'] },
+                    'docker': { version: '24.0.2', size: '85MB', deps: ['iptables', 'libseccomp'] },
+                    'htop': { version: '3.2.2', size: '1.5MB', deps: [] },
+                    'unknown-package': { exists: false }
+                };
+
+                const packages = cmd.args;
+                const failedPackages = [];
+                const installedPackages = [];
+
+                const installProcess = (packageName, depth = 0) => {
+                    return new Promise((resolve) => {
+                        const indent = '  '.repeat(depth);
+
+                        if (!packageDatabase[packageName] || packageDatabase[packageName].exists === false) {
+                            this.echo(`${indent}${color('red', 'ERROR')}: Package '${packageName}' not found in repository`);
+                            failedPackages.push(packageName);
+                            return resolve(false);
+                        }
+
+                        const pkg = packageDatabase[packageName];
+
+                        // Show installation header
+                        this.echo(`${indent}Installing ${color('yellow', packageName)} (${pkg.version}) [${pkg.size}]...`);
+
+                        // Simulate download
+                        setTimeout(() => {
+                            this.echo(`${indent}${color('blue', 'Fetching')} ${packageName} from repository...`);
+
+                            // Simulate dependency check
+                            setTimeout(() => {
+                                if (pkg.deps.length > 0) {
+                                    this.echo(`${indent}Resolving dependencies for ${packageName}...`);
+                                    pkg.deps.forEach(dep => {
+                                        this.echo(`${indent}  Requires: ${color('green', dep)}`);
+                                    });
+                                }
+
+                                // Simulate installation
+                                setTimeout(() => {
+                                    const success = Math.random() > 0.2; // 80% success rate
+
+                                    if (success) {
+                                        this.echo(`${indent}${color('green', 'Success')}: Installed ${packageName} ${pkg.version}`);
+                                        installedPackages.push(`${packageName} (${pkg.version})`);
+                                        resolve(true);
+                                    } else {
+                                        this.echo(`${indent}${color('red', 'ERROR')}: Failed to install ${packageName} (dependency conflict)`);
+                                        failedPackages.push(packageName);
+                                        resolve(false);
+                                    }
+                                }, 1500);
+                            }, 1500);
+                        }, 1000);
+                    });
+                };
+
+                const installAll = async () => {
+                    for (const pkg of packages) {
+                        await installProcess(pkg);
+                    }
+
+                    // Show summary
+                    this.echo("\nInstallation summary:");
+                    if (installedPackages.length > 0) {
+                        this.echo(color('green', 'Successfully installed:'));
+                        installedPackages.forEach(pkg => this.echo(`  ${pkg}`));
+                    }
+
+                    if (failedPackages.length > 0) {
+                        this.echo(color('red', 'Failed to install:'));
+                        failedPackages.forEach(pkg => this.echo(`  ${pkg}`));
+                        this.echo("\nTry:");
+                        this.echo("  1. Check package names for typos");
+                        this.echo("  2. Run 'update' to refresh package list");
+                        this.echo(`  3. Try 'install --fix ${failedPackages.join(' ')}'`);
+                    }
+
+                    if (installedPackages.length > 0) {
+                        this.echo("\nRun 'list --installed' to see all installed packages");
+                    }
+                };
+
+                // Check for special flags
+                if (packages.includes('--help')) {
+                    this.echo("Package Manager Help:");
+                    this.echo("  install <package>      - Install a package");
+                    this.echo("  install <pkg1> <pkg2>  - Install multiple packages");
+                    this.echo("  install --update       - Update package database");
+                    this.echo("  install --list         - List available packages");
+                    this.echo("  install --fix <pkg>    - Attempt to fix broken installation");
+                    return;
+                }
+
+                if (packages.includes('--list')) {
+                    this.echo("Available packages:");
+                    Object.keys(packageDatabase).forEach(pkg => {
+                        if (packageDatabase[pkg].exists !== false) {
+                            this.echo(`  ${color('yellow', pkg.padEnd(15))} ${packageDatabase[pkg].version.padEnd(10)} [${packageDatabase[pkg].size}]`);
+                        }
+                    });
+                    return;
+                }
+
+                if (packages.includes('--update')) {
+                    this.echo("Updating package database...");
+                    setTimeout(() => {
+                        this.echo(color('green', "Package database updated successfully"));
+                        this.echo("Now you can install the latest versions of packages");
+                    }, 3000);
+                    return;
+                }
+
+                if (packages.includes('--fix')) {
+                    const pkgToFix = packages[packages.indexOf('--fix') + 1];
+                    if (!pkgToFix) {
+                        this.error("Usage: install --fix <package_name>");
+                        return;
+                    }
+                    this.echo(`Attempting to fix ${pkgToFix}...`);
+                    setTimeout(() => {
+                        this.echo("Checking for broken dependencies...");
+                        setTimeout(() => {
+                            this.echo("Reinstalling package...");
+                            setTimeout(() => {
+                                this.echo(color('green', `Successfully fixed ${pkgToFix}`));
+                            }, 2000);
+                        }, 2000);
+                    }, 1000);
+                    return;
+                }
+
+                // Normal installation
+                installAll();
+            }),
+        };
+
+        // Initialize terminal
+        term = $(".term").terminal(
+            function (command) {
+                if (!command.trim()) return;
+                var cmd = $.terminal.parse_command(command);
+                if (commands[cmd.name]) {
+                    commands[cmd.name].call(term, cmd);
+                } else {
+                    term.error("Command not found");
+                }
+            },
+            {
+                greetings: "client side cli Terminal\n[[;white;]TIP]: Use [[;white;]help] to see available commands\n",
+                prompt: function () {
+                    const theme = currentTheme === 'hacker' ? 'green' :
+                        currentTheme === 'light' ? 'blue' : 'red';
+                    return color(theme, loggedInUser ? loggedInUser.email : 'user@example.com') +
+                        ":" + color("blue", cwd) + "$ ";
+                },
+                checkArity: false,
+                completion: function (string, cb) {
+                    cb(Object.keys(commands));
+                },
+            }
+        );
+    </script>
+</body>
+
+</html>
